@@ -4,7 +4,7 @@ use std::str;
 
 pub fn scan_wifi_networks() -> Result<String, String> {
     let output = Command::new("nmcli")
-        .args(["-t", "-f", "IN-USE,BSSID,SSID,RATE,SIGNAL,SECURITY", "device", "wifi", "list"])
+        .args(["-t", "-f", "IN-USE,BSSID,SSID,RATE,SIGNAL,SECURITY", "device", "wifi", "list", "--rescan", "yes"])
         .output()
         .map_err(|e| e.to_string())?;
 

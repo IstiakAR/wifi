@@ -5,6 +5,27 @@ import { useEffect, useMemo, useState } from "react"
 import { invoke } from "@tauri-apps/api/core"
 
 const SCAN_TIMEOUT_MS = 15000;
+const NETWORK_CACHE_KEY = "wifi:lastNetworks";
+
+const loadCachedNetworks = () => {
+    try {
+        const cached = localStorage.getItem(NETWORK_CACHE_KEY);
+        if (!cached) return [];
+
+        const parsed = JSON.parse(cached);
+        return Array.isArray(parsed) ? parsed : [];
+    } catch {
+        return [];
+    }
+};
+
+const saveCachedNetworks = (networks) => {
+    try {
+        localStorage.setItem(NETWORK_CACHE_KEY, JSON.stringify(networks));
+    } catch {
+        // Ignore storage failures and keep the in-memory list.
+    }
+};
 
 const scanWithTimeout = () =>
     Promise.race([
@@ -19,7 +40,25 @@ const parseSignalValue = (signal) => {
     return match ? Number(match[0]) : 0
 }
 
-// connectToWifi is implemented inside the component so it can access hooks/state
+const isUnknownSsid = (ssid) => {
+    const value = String(ssid || "").trim().toLowerCase()
+    return !value
+}
+
+const parseKnownNetworks = (output) => {
+    const known = new Set();
+    output.split("\n").forEach((line) => {
+        const trimmed = line.trim();
+        if (trimmed) {
+            const ssid = trimmed.split(":")[0];
+            if (ssid) {
+                known.add(ssid);
+            }
+        }
+    });
+    return known;
+};
+
 
 const getWifiStrengthLevel = (signal) => {
     const strength = parseSignalValue(signal)
@@ -88,7 +127,7 @@ const parseScanOutput = (output) => {
 };
 
 export function ListView({ wifiOn }) {
-    const [networks, setNetworks] = useState([]);
+    const [networks, setNetworks] = useState(() => loadCachedNetworks());
     const [refreshing, setRefreshing] = useState(false);
     const [error, setError] = useState("");
     const [expandedBssid, setExpandedBssid] = useState("");
@@ -97,6 +136,17 @@ export function ListView({ wifiOn }) {
     const [disconnectingBssid, setDisconnectingBssid] = useState("");
     const [forgettingBssid, setForgettingBssid] = useState("");
     const [passwordDialog, setPasswordDialog] = useState({ open: false, ssid: "", bssid: "", error: false });
+    const [knownNetworks, setKnownNetworks] = useState(new Set());
+
+    const loadKnownNetworks = async () => {
+        try {
+            const output = await invoke("scan_saved_networks");
+            const parsed = parseKnownNetworks(String(output));
+            setKnownNetworks(parsed);
+        } catch (err) {
+            console.error("Failed to load known networks", err);
+        }
+    };
 
     const refreshNetworks = async () => {
         setRefreshing(true);
@@ -104,10 +154,21 @@ export function ListView({ wifiOn }) {
         try {
             const output = await scanWithTimeout();
             const parsed = parseScanOutput(String(output));
-            setNetworks([...parsed].sort((left, right) => Number(right.active) - Number(left.active)));
+            const filtered = parsed.filter((net) => !isUnknownSsid(net.ssid))
+            const sorted = [...filtered].sort((left, right) => {
+                const leftKnown = knownNetworks.has(left.ssid) ? 1 : 0;
+                const rightKnown = knownNetworks.has(right.ssid) ? 1 : 0;
+                
+                if (leftKnown !== rightKnown) {
+                    return rightKnown - leftKnown;
+                }
+                
+                return Number(right.active) - Number(left.active);
+            });
+            setNetworks(sorted);
+            saveCachedNetworks(sorted);
         } catch (err) {
             setError(err?.message || String(err));
-            setNetworks([]);
         } finally {
             setRefreshing(false);
         }
@@ -121,6 +182,7 @@ export function ListView({ wifiOn }) {
         }
 
         refreshNetworks();
+        loadKnownNetworks();
     }, [wifiOn]);
 
     const networkCount = useMemo(() => networks.length, [networks]);
@@ -161,7 +223,7 @@ export function ListView({ wifiOn }) {
             {!wifiOn && <div className="error-text">WiFi is off.</div>}
 
             <div className="ListView">
-                {refreshing && (
+                {refreshing && networks.length === 0 && (
                     <div className="ListRow">
                         <div className="upper-row">
                             <span>Scanning for networks…</span>
@@ -169,7 +231,7 @@ export function ListView({ wifiOn }) {
                     </div>
                 )}
 
-                {!refreshing && networks.map((net) => (
+                {networks.map((net) => (
                     <div className="ListRow" key={`${net.bssid}-${net.ssid}`}>
                         <div className={`upper-row ${expandedBssid === net.bssid ? "expanded" : ""}`} onClick={async ()=>{
                                 if (!net.active) {
