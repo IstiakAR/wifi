@@ -1,39 +1,29 @@
 import "./styles/ListView.css"
 import ArrowDown from "./assets/down-arrow.png"
 import PasswordDialog from "./PasswordDialog"
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { invoke } from "@tauri-apps/api/core"
+import { loadCachedNetworks as loadCachedNetworksFromStorage, saveCachedNetworks } from "./cache"
 
 const SCAN_TIMEOUT_MS = 15000;
-const NETWORK_CACHE_KEY = "wifi:lastNetworks";
+const AUTO_REFRESH_INTERVAL_MS = 15000;
 
-const loadCachedNetworks = () => {
-    try {
-        const cached = localStorage.getItem(NETWORK_CACHE_KEY);
-        if (!cached) return [];
+const scanWithTimeout = (rescan = true) =>
+    new Promise((resolve, reject) => {
+        const timeoutId = setTimeout(() => {
+            reject(new Error("Scan timed out. Please try again."));
+        }, SCAN_TIMEOUT_MS);
 
-        const parsed = JSON.parse(cached);
-        return Array.isArray(parsed) ? parsed : [];
-    } catch {
-        return [];
-    }
-};
-
-const saveCachedNetworks = (networks) => {
-    try {
-        localStorage.setItem(NETWORK_CACHE_KEY, JSON.stringify(networks));
-    } catch {
-        // Ignore storage failures and keep the in-memory list.
-    }
-};
-
-const scanWithTimeout = () =>
-    Promise.race([
-        invoke("scan_networks"),
-        new Promise((_, reject) => {
-            setTimeout(() => reject(new Error("Scan timed out. Please try again.")), SCAN_TIMEOUT_MS);
-        }),
-    ]);
+        invoke("scan_networks", { rescan })
+            .then((result) => {
+                clearTimeout(timeoutId);
+                resolve(result);
+            })
+            .catch((err) => {
+                clearTimeout(timeoutId);
+                reject(err);
+            });
+    });
 
 const parseSignalValue = (signal) => {
     const match = String(signal || "").match(/\d+(?:\.\d+)?/)
@@ -50,13 +40,48 @@ const parseKnownNetworks = (output) => {
     output.split("\n").forEach((line) => {
         const trimmed = line.trim();
         if (trimmed) {
-            const ssid = trimmed.split(":")[0];
-            if (ssid) {
-                known.add(ssid);
+            const [name = "", type = ""] = trimmed.split(":");
+            if (!name) return;
+
+            const normalizedType = String(type || "").trim().toLowerCase();
+            if (!normalizedType || normalizedType.includes("wireless") || normalizedType === "wifi") {
+                known.add(name.trim().toLowerCase());
             }
         }
     });
     return known;
+};
+
+const parseRateValue = (rate) => {
+    const raw = String(rate || "").trim();
+    if (!raw) return 0;
+
+    const match = raw.match(/\d+(?:\.\d+)?/);
+    if (!match) return 0;
+
+    const value = Number(match[0]);
+    const lower = raw.toLowerCase();
+
+    if (lower.includes("gbit")) return value * 1000;
+    if (lower.includes("kbit")) return value / 1000;
+    return value;
+};
+
+const sortNetworks = (list, knownSet) => {
+    const arr = [...(Array.isArray(list) ? list : [])];
+
+    const sorted = arr
+        .sort((a, b) => String(a.ssid || "").localeCompare(String(b.ssid || ""), undefined, { sensitivity: "base" }))
+        .sort((a, b) => parseRateValue(b.rate) - parseRateValue(a.rate))
+        .sort((a, b) => getWifiStrengthLevel(b.signal) - getWifiStrengthLevel(a.signal))
+        .sort((a, b) => {
+            const aKnown = knownSet?.has((a.ssid || "").trim().toLowerCase()) ? 1 : 0;
+            const bKnown = knownSet?.has((b.ssid || "").trim().toLowerCase()) ? 1 : 0;
+            return bKnown - aKnown;
+        })
+        .sort((a, b) => (b.active ? 1 : 0) - (a.active ? 1 : 0));
+
+    return sorted;
 };
 
 
@@ -126,8 +151,8 @@ const parseScanOutput = (output) => {
     });
 };
 
-export function ListView({ wifiOn }) {
-    const [networks, setNetworks] = useState(() => loadCachedNetworks());
+export function ListView({ wifiOn, initialNetworks = [] }) {
+    const [networks, setNetworks] = useState(() => sortNetworks(initialNetworks, new Set()));
     const [refreshing, setRefreshing] = useState(false);
     const [error, setError] = useState("");
     const [expandedBssid, setExpandedBssid] = useState("");
@@ -137,6 +162,40 @@ export function ListView({ wifiOn }) {
     const [forgettingBssid, setForgettingBssid] = useState("");
     const [passwordDialog, setPasswordDialog] = useState({ open: false, ssid: "", bssid: "", error: false });
     const [knownNetworks, setKnownNetworks] = useState(new Set());
+    const knownNetworksRef = useRef(knownNetworks);
+    const [connectionAttemptActive, setConnectionAttemptActive] = useState(false);
+
+    const refreshInFlightRef = useRef(null);
+    const autoRefreshTimerRef = useRef(null);
+    const autoRefreshPausedRef = useRef(false);
+
+    const clearAutoRefreshTimer = () => {
+        if (autoRefreshTimerRef.current) {
+            clearTimeout(autoRefreshTimerRef.current);
+            autoRefreshTimerRef.current = null;
+        }
+    };
+
+    const scheduleAutoRefresh = () => {
+        clearAutoRefreshTimer();
+        if (!wifiOn || autoRefreshPausedRef.current) return;
+
+        autoRefreshTimerRef.current = setTimeout(() => {
+            refreshNetworks().finally(() => {
+                scheduleAutoRefresh();
+            });
+        }, AUTO_REFRESH_INTERVAL_MS);
+    };
+
+    const pauseAutoRefresh = () => {
+        autoRefreshPausedRef.current = true;
+        clearAutoRefreshTimer();
+    };
+
+    const resumeAutoRefresh = () => {
+        autoRefreshPausedRef.current = false;
+        scheduleAutoRefresh();
+    };
 
     const loadKnownNetworks = async () => {
         try {
@@ -148,28 +207,33 @@ export function ListView({ wifiOn }) {
         }
     };
 
-    const refreshNetworks = async () => {
+    const refreshNetworks = async ({ rescan = true } = {}) => {
+        if (refreshInFlightRef.current) {
+            return refreshInFlightRef.current;
+        }
+
         setRefreshing(true);
         setError("");
-        try {
-            const output = await scanWithTimeout();
+
+        const promise = (async () => {
+            const output = await scanWithTimeout(rescan);
             const parsed = parseScanOutput(String(output));
             const filtered = parsed.filter((net) => !isUnknownSsid(net.ssid))
-            const sorted = [...filtered].sort((left, right) => {
-                const leftKnown = knownNetworks.has(left.ssid) ? 1 : 0;
-                const rightKnown = knownNetworks.has(right.ssid) ? 1 : 0;
-                
-                if (leftKnown !== rightKnown) {
-                    return rightKnown - leftKnown;
-                }
-                
-                return Number(right.active) - Number(left.active);
-            });
-            setNetworks(sorted);
-            saveCachedNetworks(sorted);
+            if (filtered.length > 0) {
+                const sorted = sortNetworks(filtered, knownNetworksRef.current);
+                setNetworks(sorted);
+                saveCachedNetworks(sorted);
+            }
+        })();
+
+        refreshInFlightRef.current = promise;
+
+        try {
+            await promise;
         } catch (err) {
             setError(err?.message || String(err));
         } finally {
+            refreshInFlightRef.current = null;
             setRefreshing(false);
         }
     };
@@ -178,12 +242,36 @@ export function ListView({ wifiOn }) {
         if (!wifiOn) {
             setNetworks([]);
             setError("");
+            setConnectionAttemptActive(false);
+            autoRefreshPausedRef.current = false;
+            clearAutoRefreshTimer();
+            refreshInFlightRef.current = null;
             return;
         }
 
-        refreshNetworks();
+        setNetworks((current) => {
+            if (current.length > 0) return current;
+            const cached = loadCachedNetworksFromStorage();
+            return sortNetworks(cached, knownNetworks);
+        });
+
         loadKnownNetworks();
+        refreshNetworks({ rescan: true }).finally(() => {
+            scheduleAutoRefresh();
+        });
+
+        return () => {
+            clearAutoRefreshTimer();
+        };
     }, [wifiOn]);
+
+    useEffect(() => {
+        knownNetworksRef.current = knownNetworks;
+    }, [knownNetworks]);
+
+    useEffect(() => {
+        setNetworks((current) => sortNetworks(current, knownNetworks));
+    }, [knownNetworks]);
 
     const networkCount = useMemo(() => networks.length, [networks]);
 
@@ -195,19 +283,38 @@ export function ListView({ wifiOn }) {
         setPasswordDialog({ open: false, ssid: "", bssid: "", error: false });
     };
 
+    const cancelPasswordDialog = () => {
+        closePasswordDialog();
+        if (connectionAttemptActive) {
+            setConnectionAttemptActive(false);
+            resumeAutoRefresh();
+        }
+    };
+
     const openPasswordDialog = (net) => {
         setPasswordDialog({ open: true, ssid: net.ssid, bssid: net.bssid, error: false });
     };
 
     const connectToWifi = async (bssid, ssid, net) => {
+        pauseAutoRefresh();
+        setConnectionAttemptActive(true);
+        let waitingForPassword = false;
         try {
+            if (refreshInFlightRef.current) {
+                await refreshInFlightRef.current.catch(() => {});
+            }
             setConnectingBssid(bssid);
             await invoke("connect_known", { ssid });
-            await refreshNetworks();
+            await refreshNetworks({ rescan: false });
         } catch (err) {
+            waitingForPassword = true;
             openPasswordDialog(net);
         } finally {
             setConnectingBssid("");
+            if (!waitingForPassword) {
+                setConnectionAttemptActive(false);
+                resumeAutoRefresh();
+            }
         }
     };
 
@@ -215,7 +322,7 @@ export function ListView({ wifiOn }) {
         <div className="main-container">
             <div className="TextRow">
                 <span>Available Networks{networkCount ? ` (${networkCount})` : ""}:</span>
-                <button className="Refresh" onClick={refreshNetworks} disabled={refreshing || !wifiOn}>
+                <button className="Refresh" onClick={() => refreshNetworks({ rescan: true })} disabled={refreshing || !wifiOn || connectionAttemptActive}>
                     {refreshing ? "Refreshing..." : "Refresh"}
                 </button>
             </div>
@@ -262,7 +369,7 @@ export function ListView({ wifiOn }) {
                                             try {
                                                 setDisconnectingBssid(net.bssid);
                                                 await invoke("disconnect_wifi", { ssid: net.ssid });
-                                                await refreshNetworks();
+                                                    await refreshNetworks({ rescan: false });
                                             } catch (e) {
                                                 setError(e?.message || String(e));
                                             } finally {
@@ -331,7 +438,7 @@ export function ListView({ wifiOn }) {
                                                 try {
                                                     setForgettingBssid(net.bssid);
                                                     await invoke("forget_wifi", { ssid: net.ssid });
-                                                    await refreshNetworks();
+                                                    await refreshNetworks({ rescan: false });
                                                 } catch (e) {
                                                     setError(e?.message || String(e));
                                                 } finally {
@@ -353,13 +460,20 @@ export function ListView({ wifiOn }) {
                     ssid={passwordDialog.ssid}
                     error={passwordDialog.error}
                     submitting={connectingBssid === passwordDialog.bssid}
-                    onCancel={closePasswordDialog}
+                    onCancel={cancelPasswordDialog}
                     onSubmit={async (password) => {
                         try {
+                            pauseAutoRefresh();
+                            setConnectionAttemptActive(true);
+                            if (refreshInFlightRef.current) {
+                                await refreshInFlightRef.current.catch(() => {});
+                            }
                             setConnectingBssid(passwordDialog.bssid);
                             await invoke("connect_new", { ssid: passwordDialog.ssid, password });
                             closePasswordDialog();
-                            await refreshNetworks();
+                            await refreshNetworks({ rescan: false });
+                            setConnectionAttemptActive(false);
+                            resumeAutoRefresh();
                         } catch (err) {
                             setPasswordDialog((current) => ({ ...current, error: true }));
                         } finally {

@@ -8,13 +8,17 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 
 export default function DecorationBar({ wifiOn, setWifiOn }) {
-  const toggleWiFi = () => {
-    if (wifiOn) {
-      invoke("wifi_off");
-    } else {
-      invoke("wifi_on");
+  const toggleWiFi = async () => {
+    try {
+      if (wifiOn) {
+        await invoke("wifi_off");
+      } else {
+        await invoke("wifi_on");
+      }
+      setWifiOn(!wifiOn);
+    } catch (err) {
+      console.error("Failed to toggle WiFi", err);
     }
-    setWifiOn(!wifiOn);
   };
 
   const closeWindow = async () => {

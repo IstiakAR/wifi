@@ -5,8 +5,9 @@ use tauri::command;
 use wifi::*;
 
 #[command]
-async fn scan_networks() -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(scan_wifi_networks)
+async fn scan_networks(rescan: Option<bool>) -> Result<String, String> {
+    let rescan = rescan.unwrap_or(true);
+    tauri::async_runtime::spawn_blocking(move || scan_wifi_networks(rescan))
         .await
         .map_err(|e| e.to_string())?
 }

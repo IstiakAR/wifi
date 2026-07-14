@@ -1,7 +1,35 @@
-# Tauri + React
+# WiFi Manager
 
-This template should help get you started developing with Tauri and React in Vite.
+A desktop WiFi manager for Linux using `nmcli`.
 
-## Recommended IDE Setup
+## Downloads
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+Pre-built executables are available in [Releases](https://github.com/your-username/your-repo/releases). Download the latest release for your architecture and run it directly.
+
+## Building from Source
+
+```bash
+npm install
+npm run tauri:build
+```
+
+The executable will be in `src-tauri/target/release/`.
+
+### Prerequisites
+
+- Node.js 18+
+- Rust toolchain
+- Tauri system dependencies (webkit2gtk, etc.) — see [Tauri docs](https://v2.tauri.app/start/prerequisites/)
+
+## Development
+
+```bash
+npm install
+npm run tauri:dev
+```
+
+## Tech Stack
+
+- **Frontend:** React 19 + Vite
+- **Backend:** Rust + Tauri 2
+- **Networking:** nmcli (NetworkManager CLI)

@@ -2,9 +2,18 @@
 use std::process::Command;
 use std::str;
 
-pub fn scan_wifi_networks() -> Result<String, String> {
+pub fn scan_wifi_networks(rescan: bool) -> Result<String, String> {
     let output = Command::new("nmcli")
-        .args(["-t", "-f", "IN-USE,BSSID,SSID,RATE,SIGNAL,SECURITY", "device", "wifi", "list", "--rescan", "yes"])
+        .args([
+            "-t",
+            "-f",
+            "IN-USE,BSSID,SSID,RATE,SIGNAL,SECURITY",
+            "device",
+            "wifi",
+            "list",
+            "--rescan",
+            if rescan { "yes" } else { "no" },
+        ])
         .output()
         .map_err(|e| e.to_string())?;
 
@@ -20,7 +29,7 @@ pub fn scan_wifi_networks() -> Result<String, String> {
 
 pub fn scan_known_networks() -> Result<String, String> {
     let output = Command::new("nmcli")
-        .args(["connection", "show"])
+        .args(["-t", "-f", "NAME,TYPE", "connection", "show"])
         .output()
         .map_err(|e| e.to_string())?;
 
