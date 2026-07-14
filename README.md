@@ -4,7 +4,7 @@ A desktop WiFi manager for Linux using `nmcli`.
 
 ## Downloads
 
-Pre-built executables are available in [Releases](https://github.com/your-username/your-repo/releases). Download the latest release for your architecture and run it directly.
+Pre-built executables are available in [Releases](https://github.com/IstiakAR/wifi/releases). Download the latest release for your architecture and run it directly.
 
 ## Building from Source
 
@@ -28,8 +28,3 @@ npm install
 npm run tauri:dev
 ```
 
-## Tech Stack
-
-- **Frontend:** React 19 + Vite
-- **Backend:** Rust + Tauri 2
-- **Networking:** nmcli (NetworkManager CLI)
