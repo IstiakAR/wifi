@@ -90,6 +90,16 @@ pub fn get_wifi_password(ssid: &str) -> Option<String> {
     None
 }
 
+pub fn get_wifi_radio_state() -> bool {
+    Command::new("nmcli")
+        .args(["radio", "wifi"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim() == "enabled")
+        .unwrap_or(false)
+}
+
 pub fn turn_wifi_on() -> () {
     let _ = Command::new("nmcli")
         .args(["radio", "wifi", "on"])
@@ -167,6 +177,38 @@ pub fn forget_wifi(ssid: &str) -> Result<String, String> {
         let stderr = str::from_utf8(&output.stderr).unwrap_or("Unknown error");
         Err(stderr.to_string())
     }
+}
+
+pub fn setup_boot_scan() -> Result<(), String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let dir = std::path::PathBuf::from(&home).join(".config/systemd/user");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let service = dir.join("wifi-refresh.service");
+    let contents = "[Unit]\n\
+        Description=Pre-scan WiFi networks for faster app startup\n\
+        After=network.target\n\
+        \n\
+        [Service]\n\
+        Type=oneshot\n\
+        ExecStart=/bin/sh -c 'if [ \"$(nmcli -t -f WIFI radio)\" = \"enabled\" ]; then nmcli device wifi list --rescan yes; fi'\n\
+        RemainAfterExit=yes\n\
+        \n\
+        [Install]\n\
+        WantedBy=default.target\n";
+    std::fs::write(&service, contents).map_err(|e| e.to_string())?;
+
+    let _ = Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .output();
+    let _ = Command::new("systemctl")
+        .args(["--user", "enable", "wifi-refresh.service"])
+        .output();
+    let _ = Command::new("systemctl")
+        .args(["--user", "start", "wifi-refresh.service"])
+        .output();
+
+    Ok(())
 }
 
 pub fn modify_wifi_password(ssid: &str, password: &str) -> Result<String, String> {

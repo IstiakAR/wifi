@@ -28,6 +28,13 @@ async fn active_wifi_connection() -> Option<String> {
 }
 
 #[command]
+async fn wifi_is_on() -> bool {
+    tauri::async_runtime::spawn_blocking(get_wifi_radio_state)
+        .await
+        .unwrap_or(false)
+}
+
+#[command]
 async fn wifi_on() {
     let _ = tauri::async_runtime::spawn_blocking(turn_wifi_on).await;
 }
@@ -74,6 +81,13 @@ async fn get_password(ssid: String) -> Option<String> {
 }
 
 #[command]
+async fn setup_boot_scan() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(wifi::setup_boot_scan)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[command]
 async fn update_password(ssid: String, password: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || modify_wifi_password(&ssid, &password))
         .await
@@ -89,12 +103,14 @@ pub fn run() {
             active_wifi_connection,
             wifi_on,
             wifi_off,
+            wifi_is_on,
             connect_known,
             connect_new,
             disconnect_wifi,
             forget_wifi,
             get_password,
-            update_password
+            update_password,
+            setup_boot_scan
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

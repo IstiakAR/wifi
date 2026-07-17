@@ -1,14 +1,21 @@
 .main-container{
+    display: flex;
+    flex-direction: column;
+    align-items: center;
     padding-top: 40px;
-    padding-bottom: 40px;
 }
 
 .TextRow{
     display: flex;
     flex-direction: row;
     justify-content: space-between;
+    align-items: center;
     user-select: none;
     -webkit-user-select: none;
+    flex-shrink: 0;
+    width: 640px;
+    padding: 0 22px;
+    box-sizing: border-box;
 }
 
 .error-text{

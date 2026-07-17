@@ -12,12 +12,25 @@ function Root() {
     let cancelled = false;
 
     (async () => {
-      const [activeSsid, cachedNetworks] = await Promise.all([
+      if (!localStorage.getItem("wifi:bootServiceInstalled")) {
+        try {
+          await invoke("setup_boot_scan");
+          localStorage.setItem("wifi:bootServiceInstalled", "1");
+        } catch {
+          // systemd not available – non-critical
+        }
+      }
+    })();
+
+    (async () => {
+      const [activeSsid, cachedNetworks, actuallyOn] = await Promise.all([
         invoke("active_wifi_connection").catch(() => null),
         Promise.resolve().then(loadCachedNetworks),
+        invoke("wifi_is_on").catch(() => true),
       ]);
 
       if (cancelled) return;
+      setWifiOn(actuallyOn);
       setInitialNetworks(computeStartupNetworks({ cachedNetworks, activeSsid }));
     })();
 
